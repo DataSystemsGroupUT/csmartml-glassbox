@@ -1,0 +1,11 @@
+flask
+flask-cors
+flask-sse
+redis
+pandas
+numpy
+scipy
+scikit-learn
+deap
+s-dbw==0.4.0
+psutil

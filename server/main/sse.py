@@ -1,0 +1,200 @@
+import os
+import time
+
+import pandas as pd
+from sklearn.decomposition import PCA
+from flask import Flask, jsonify, render_template, request
+from flask_cors import CORS
+from flask_sse import sse
+
+# from csmartml import csmartml as cm
+from csmartml.HyperPartitions import HyperPartitions as HPT
+from csmartml.worker import PartitionController
+
+from sse_utils import init_hpartitions, get_default_searchspace
+
+from collections import OrderedDict
+from sklearn.datasets import load_iris
+from sklearn.decomposition import PCA
+
+import redis
+import psutil
+
+
+def initialize_app():
+	app = Flask(__name__)
+	app.config["REDIS_URL"] = "redis://localhost:6379"
+	# app.config["REDIS_URL"] = "redis://obo:6379"
+	app.register_blueprint(sse, url_prefix='/stream')
+	CORS(app)
+
+	@app.route('/publish')
+	def publish(data, type):
+		sse.publish(data, type=type)
+		# sse.publish({"message": "Hello World!"}, type='message')
+		return "Message sent!"
+
+	@app.route('/')
+	def index():
+		# return "Hello World!"
+		return render_template("index.html")
+
+
+	@app.route('/testrun', methods=["POST"])
+	def testrun():
+		cfg = request.get_json(force=True)
+		print("Test run config = ", cfg)
+		mpc = PartitionController(cfg, publish) # publish
+		topN = mpc.run_workers()
+  
+		while not bool(topN):
+			time.sleep(10)
+
+		dummy_data = load_iris().data
+		model_labels = dict()
+
+		for M in topN:
+			print("Config = ", M["config"])
+			cluster = M["config"].fit(dummy_data)
+			model_labels[M["id"]] = cluster.labels_.tolist()
+			del M["config"]
+      
+		pca_2d = PCA(n_components=2).fit(dummy_data).transform(dummy_data)
+
+		return {
+			"hof": topN, 
+   			"pca": pca_2d.tolist(), 
+      		"mlabels": model_labels
+		}
+
+	@app.route('/processmgr', methods=["POST"])
+	def processmgr():
+		pid = int(request.get_json(force=True)["pid"])
+		ps = psutil.Process(pid)
+
+		if ps.status() == 'running':
+			ps.suspend()
+		else:
+			ps.resume()
+
+		return({"status": 101})
+
+	@app.route('/disable', methods=["POST"])
+	def disable():
+		task_data = request.get_json(force=True)
+		print(task_data)
+  
+	# @app.route('/popo', methods=["GET"])
+	# def popo():
+	# 	return("Hello")
+
+	@app.route('/partitions', methods=["POST"])
+	def partitions():
+		payload = request.get_json(force=True)
+		dataset = payload["dataset"]
+		algorithm = payload["algorithm"]
+  
+		data = pd.read_csv("./csmartml/datasets/{}.csv".format(dataset)).iloc[:, :-1]
+		hp_model = HPT(algorithm, data)
+		hp_set = hp_model.hyper_param_combination()
+		hparams, hparts, active_part = init_hpartitions(hp_set)
+		default_search_space = get_default_searchspace(algorithm, len(data))
+
+		
+		print("Hyper-parameters = ", hparams)
+		print("Hyper-partitions = ", hparts)
+		print("Default search space = ", default_search_space)
+    
+		return {
+      				"hparams": hparams, 
+          			"hparts": hparts, 
+             		"ap": active_part,
+					"search_space": default_search_space
+               }
+  
+	
+	# @app.route('/hparams', methods=["GET"])
+	# def hparams():
+	# 	return("Hello")
+
+	# @app.route("/taskrun", methods=["POST"])
+	# def taskrun():
+	# 	# Get task configurations
+	# 	global file
+	# 	task_data = request.get_json(force=True)
+	# 	dataset = task_data["dataset"]
+	# 	time_budget = int(task_data["time"])
+	# 	resultPreference = task_data["result"]
+
+	# 	# time_budget = 10
+	# 	uploadedData = None
+	# 	POP_SIZE = 10
+
+	# 	# Load benchmark dataset or get uploaded dataset
+	# 	if "ud" in task_data.keys():
+	# 		td = task_data["ud"]
+	# 		data = pd.DataFrame.from_dict(td, columns=None)
+	# 		data = data.iloc[:-1]
+	# 		uploadedData = data
+	# 	else:
+	# 		# file = "main/csmartml/datasets/{}.csv".format(dataset)
+	# 		file = "./csmartml/datasets/{}.csv".format(dataset)
+	# 		data = pd.read_csv(file, header=None, index_col=None, na_values='?')
+	# 		data = data.iloc[:, :-1]
+
+	# 	# Initialize smart clustering framework
+	# 	if "algorithm" in task_data.keys():
+	# 		alg = task_data["algorithm"]
+	# 		metric = task_data["metric"]
+	# 		comb = cm.CSmartML(dataset, POP_SIZE, time_budget, publish, False, algorithm=alg, cvi=metric,
+	# 						   dataset=uploadedData, result=resultPreference)
+	# 		pops, algorithm = comb.search(publish)
+	# 	else:
+	# 		comb = cm.CSmartML(dataset, POP_SIZE, time_budget, publish, True, dataset=uploadedData, result=resultPreference)
+	# 		pops, algorithm = comb.search(publish)
+
+	# 	while pops is None:
+	# 		time.sleep(time_budget)
+
+	# 	i = 0
+	# 	configurations = {}
+	# 	configuration_values = {}
+	# 	for pop in pops:
+	# 		cluster = pop[0].fit(data)
+	# 		configurations["CONFIG-{}".format(i)] = cluster.labels_.tolist()
+	# 		configuration_values["CONFIG-{}".format(i)] = str(pop[0])
+	# 		i += 1
+
+	# 	pca_2d = PCA(n_components=2).fit(data).transform(data)
+
+	# 	# configurations = OrderedDict(sorted(configurations.items()))
+
+	# 	return {"clusters": configurations, "pca": pca_2d.tolist(), "data": data.to_numpy().tolist(), "configs": configuration_values}
+
+	# @app.route('/modify')
+	# def modify():
+	# 	return jsonify({"STATUS": "Hello World!"})
+
+	@app.route('/redis')
+	def reorder():
+		# is_connected = redis.from_url("redis://obo:6379")
+		is_connected = redis.from_url("redis://localhost:6379")
+		name = is_connected.acl_users()
+		return jsonify({"Client": name})
+
+	return app
+
+
+# Todo: Configure and initialize redis
+def startapp():
+	app = initialize_app()
+	app.run(
+		host="0.0.0.0",
+		port="5555",
+		debug=True
+	)
+
+
+if __name__ == "__main__":
+	startapp()
+
